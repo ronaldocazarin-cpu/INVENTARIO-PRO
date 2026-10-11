@@ -7,3 +7,4 @@ Inventario para negocios: escaneo de código de barras, reconocimiento por foto 
 - Base de datos y usuarios: Supabase.
 
 Publicar en Cloudflare Pages: sin comando de build, directorio de salida `/` (raíz).
+a
