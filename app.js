@@ -5,6 +5,110 @@ const {
   useCallback
 } = React;
 const sb = window.supabase.createClient(window.KARDEX_CONFIG.supabaseUrl, window.KARDEX_CONFIG.supabaseKey);
+
+// ---------- Barra inferior: se oculta mientras hay ventanas abiertas ----------
+let navLocks = 0;
+function useHideNav(active) {
+  useEffect(() => {
+    if (!active) return;
+    navLocks++;
+    document.body.classList.add("modal-open");
+    return () => {
+      navLocks = Math.max(0, navLocks - 1);
+      if (navLocks === 0) document.body.classList.remove("modal-open");
+    };
+  }, [active]);
+}
+
+// ---------- Tema (color y modo) por persona ----------
+const THEME_PRESETS = [{
+  id: "indigo",
+  name: "Índigo",
+  p1: "#4F46E5",
+  p2: "#7C5CFF"
+}, {
+  id: "azul",
+  name: "Azul",
+  p1: "#2563EB",
+  p2: "#38BDF8"
+}, {
+  id: "turquesa",
+  name: "Turquesa",
+  p1: "#0D9488",
+  p2: "#2DD4BF"
+}, {
+  id: "esmeralda",
+  name: "Esmeralda",
+  p1: "#059669",
+  p2: "#34D399"
+}, {
+  id: "naranja",
+  name: "Naranja",
+  p1: "#EA580C",
+  p2: "#FB923C"
+}, {
+  id: "rosa",
+  name: "Rosa",
+  p1: "#DB2777",
+  p2: "#F472B6"
+}, {
+  id: "morado",
+  name: "Morado",
+  p1: "#7C3AED",
+  p2: "#C084FC"
+}, {
+  id: "grafito",
+  name: "Grafito",
+  p1: "#334155",
+  p2: "#64748B"
+}];
+const THEME_KEY = "kardex-theme";
+const DEFAULT_THEME = {
+  accent: "indigo",
+  custom: "#4F46E5",
+  mode: "auto"
+};
+function mixHex(a, b, t) {
+  const pa = [1, 3, 5].map(i => parseInt(a.slice(i, i + 2), 16)),
+    pb = [1, 3, 5].map(i => parseInt(b.slice(i, i + 2), 16));
+  return "#" + pa.map((v, i) => Math.round(v + (pb[i] - v) * t).toString(16).padStart(2, "0")).join("");
+}
+function loadTheme() {
+  try {
+    const t = JSON.parse(localStorage.getItem(THEME_KEY));
+    if (t && t.mode) return {
+      ...DEFAULT_THEME,
+      ...t
+    };
+  } catch (e) {}
+  return {
+    ...DEFAULT_THEME
+  };
+}
+function applyTheme(t) {
+  const root = document.documentElement;
+  const preset = THEME_PRESETS.find(x => x.id === t.accent);
+  let p1, p2;
+  if (preset) {
+    p1 = preset.p1;
+    p2 = preset.p2;
+  } else {
+    p1 = /^#[0-9a-f]{6}$/i.test(t.custom || "") ? t.custom : "#4F46E5";
+    p2 = mixHex(p1, "#ffffff", 0.28);
+  }
+  if (t.mode === "light" || t.mode === "dark") root.setAttribute("data-theme", t.mode);else root.removeAttribute("data-theme");
+  const dark = t.mode === "dark" || t.mode !== "light" && window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+  if (dark) {
+    p1 = mixHex(p1, "#ffffff", 0.28);
+    p2 = mixHex(p2, "#ffffff", 0.28);
+  }
+  root.style.setProperty("--primary", p1);
+  root.style.setProperty("--primary-2", p2);
+  root.style.setProperty("--primary-soft", "color-mix(in srgb, " + p1 + " 16%, var(--surface))");
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.setAttribute("content", p1);
+}
+applyTheme(loadTheme());
 const DEFAULT_CATEGORIES = ["Bebidas", "Botanas y galletas", "Panadería", "Lácteos y huevo", "Abarrotes", "Limpieza y hogar"];
 const CAT_COLORS = ["#4F46E5", "#F59E0B", "#EF5B6B", "#0EA5E9", "#10B981", "#A855F7", "#EC4899", "#14B8A6"];
 const MOTIVOS = ["Producto defectuoso", "Cliente se arrepintió", "Producto equivocado", "Empaque dañado", "Otro"];
@@ -236,6 +340,7 @@ function VenderView({
   const [qty, setQty] = useState(1);
   const [busy, setBusy] = useState(false);
   const inputRef = useRef(null);
+  useHideNav(mode === "camera");
   useEffect(() => {
     if (mode === "scan" && inputRef.current) inputRef.current.focus();
   }, [mode]);
@@ -504,6 +609,7 @@ function DevolucionView({
   const [barcodeInput, setBarcodeInput] = useState("");
   const [scanStatus, setScanStatus] = useState(null); // null | "scanning" | "notfound" | "none"
   const [showCamera, setShowCamera] = useState(false);
+  useHideNav(showCamera);
   const filtered = products.filter(p => p.name.toLowerCase().includes(query.toLowerCase()) || p.barcode.includes(query));
   function reset() {
     setSel(null);
@@ -662,12 +768,392 @@ function DevolucionView({
     onCancel: () => setShowCamera(false)
   }))));
 }
+function EditProductModal({
+  product,
+  products,
+  categories,
+  onSave,
+  onDelete,
+  onClose,
+  onUploadPhoto
+}) {
+  useHideNav(true);
+  const [name, setName] = useState(product.name);
+  const [barcode, setBarcode] = useState(product.barcode || "");
+  const [category, setCategory] = useState(product.category || "");
+  const [stock, setStock] = useState(String(product.stock));
+  const [minStock, setMinStock] = useState(String(product.minStock));
+  const [price, setPrice] = useState(product.price ? String(product.price) : "");
+  const [nota, setNota] = useState("");
+  const [photo, setPhoto] = useState(null); // {previewUrl,path,uploading,failed}
+  const [cameraOpen, setCameraOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [confirmDel, setConfirmDel] = useState(false);
+  const catNames = categories.map(c => c.name);
+  if (product.category && !catNames.includes(product.category)) catNames.push(product.category);
+  const dup = barcode.trim() ? products.find(p => p.id !== product.id && p.barcode === barcode.trim()) : null;
+  const stockNum = Math.max(0, parseInt(stock, 10) || 0);
+  const delta = stockNum - product.stock;
+  const shownPhoto = photo ? photo.previewUrl : product.photoUrl;
+  function bump(n) {
+    setStock(String(Math.max(0, stockNum + n)));
+  }
+  function takePhoto(blob, previewUrl) {
+    setCameraOpen(false);
+    setPhoto({
+      previewUrl,
+      path: null,
+      uploading: true,
+      failed: false
+    });
+    onUploadPhoto(blob).then(res => {
+      if (res) setPhoto(p => p && {
+        ...p,
+        path: res.id,
+        uploading: false
+      });else setPhoto(p => p && {
+        ...p,
+        uploading: false,
+        failed: true
+      });
+    });
+  }
+  async function submit(e) {
+    e.preventDefault();
+    if (!name.trim() || dup || saving || photo && photo.uploading) return;
+    setSaving(true);
+    const changes = {
+      name: name.trim(),
+      barcode: barcode.trim() || null,
+      category,
+      min_stock: Math.max(0, parseInt(minStock, 10) || 0),
+      price: Number(price) || 0
+    };
+    if (photo && photo.path) changes.photo_path = photo.path;
+    const ok = await onSave(product, changes, stockNum, nota.trim());
+    setSaving(false);
+    if (ok) onClose();
+  }
+  async function doDelete() {
+    setSaving(true);
+    const ok = await onDelete(product);
+    setSaving(false);
+    if (ok) onClose();
+  }
+  return /*#__PURE__*/React.createElement(React.Fragment, null, /*#__PURE__*/React.createElement("div", {
+    className: "modal-ov",
+    onClick: () => !saving && onClose()
+  }, /*#__PURE__*/React.createElement("form", {
+    className: "modal",
+    onClick: e => e.stopPropagation(),
+    onSubmit: submit
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-h"
+  }, /*#__PURE__*/React.createElement("span", null, "Editar producto"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rbtn",
+    style: {
+      background: "var(--surface-2)",
+      color: "var(--ink)"
+    },
+    onClick: onClose,
+    disabled: saving
+  }, "✕")), /*#__PURE__*/React.createElement("div", {
+    className: "stock-box"
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "theme-label",
+    style: {
+      marginTop: 0
+    }
+  }, "Existencia"), /*#__PURE__*/React.createElement("div", {
+    className: "stock-edit"
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => bump(-1),
+    "aria-label": "Reducir"
+  }, "–"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "numeric",
+    min: "0",
+    value: stock,
+    onChange: e => setStock(e.target.value)
+  }), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => bump(1),
+    "aria-label": "Aumentar"
+  }, "+")), /*#__PURE__*/React.createElement("div", {
+    className: "quick-adj"
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => bump(-10)
+  }, "−10"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => bump(-5)
+  }, "−5"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => bump(5)
+  }, "+5"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    onClick: () => bump(10)
+  }, "+10")), /*#__PURE__*/React.createElement("div", {
+    className: "delta " + (delta < 0 ? "neg" : delta > 0 ? "pos" : "")
+  }, delta === 0 ? `Existencia actual: ${product.stock}` : `${product.stock} → ${stockNum}  (${delta > 0 ? "+" : ""}${delta})`), delta !== 0 && /*#__PURE__*/React.createElement("label", {
+    className: "field",
+    style: {
+      marginBottom: 0
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "Motivo del ajuste (opcional)"), /*#__PURE__*/React.createElement("input", {
+    value: nota,
+    onChange: e => setNota(e.target.value),
+    placeholder: "Ej. conteo físico, merma, reposición"
+  }))), /*#__PURE__*/React.createElement("label", {
+    className: "field"
+  }, /*#__PURE__*/React.createElement("span", null, "Nombre"), /*#__PURE__*/React.createElement("input", {
+    value: name,
+    onChange: e => setName(e.target.value),
+    required: true
+  })), /*#__PURE__*/React.createElement("label", {
+    className: "field"
+  }, /*#__PURE__*/React.createElement("span", null, "Categoría"), /*#__PURE__*/React.createElement("select", {
+    value: category,
+    onChange: e => setCategory(e.target.value)
+  }, /*#__PURE__*/React.createElement("option", {
+    value: ""
+  }, "Sin categoría"), catNames.map(n => /*#__PURE__*/React.createElement("option", {
+    key: n,
+    value: n
+  }, n)))), /*#__PURE__*/React.createElement("label", {
+    className: "field"
+  }, /*#__PURE__*/React.createElement("span", null, "Código de barras"), /*#__PURE__*/React.createElement("input", {
+    value: barcode,
+    onChange: e => setBarcode(e.target.value)
+  }), dup && /*#__PURE__*/React.createElement("span", {
+    className: "field-error"
+  }, "Ya existe: \"", dup.name, "\" usa este código")), /*#__PURE__*/React.createElement("div", {
+    className: "two-col"
+  }, /*#__PURE__*/React.createElement("label", {
+    className: "field"
+  }, /*#__PURE__*/React.createElement("span", null, "Stock mínimo"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "numeric",
+    min: "0",
+    value: minStock,
+    onChange: e => setMinStock(e.target.value)
+  })), /*#__PURE__*/React.createElement("label", {
+    className: "field"
+  }, /*#__PURE__*/React.createElement("span", null, "Precio (MXN)"), /*#__PURE__*/React.createElement("input", {
+    type: "number",
+    inputMode: "decimal",
+    min: "0",
+    step: "0.01",
+    value: price,
+    onChange: e => setPrice(e.target.value),
+    placeholder: "0.00"
+  }))), /*#__PURE__*/React.createElement("p", {
+    className: "hint",
+    style: {
+      margin: "4px 0 6px"
+    }
+  }, "Foto de perfil"), shownPhoto ? /*#__PURE__*/React.createElement("div", {
+    className: "photo-preview"
+  }, /*#__PURE__*/React.createElement("img", {
+    src: shownPhoto,
+    alt: ""
+  }), photo && photo.uploading && /*#__PURE__*/React.createElement("span", {
+    className: "photo-tag"
+  }, "Subiendo foto…"), photo && photo.failed && /*#__PURE__*/React.createElement("span", {
+    className: "photo-tag photo-tag-warn"
+  }, "La foto no se guardará"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "photo-change",
+    onClick: () => setCameraOpen(true)
+  }, "Cambiar foto")) : /*#__PURE__*/React.createElement("div", {
+    className: "photo-field"
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "btn btn-outline",
+    style: {
+      margin: 0
+    },
+    onClick: () => setCameraOpen(true)
+  }, "📷 Tomar foto"), /*#__PURE__*/React.createElement("label", {
+    className: "upload-link"
+  }, "o subir una imagen existente", /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: "image/*",
+    style: {
+      display: "none"
+    },
+    onChange: e => {
+      const f = e.target.files[0];
+      if (f) takePhoto(f, URL.createObjectURL(f));
+    }
+  }))), shownPhoto && /*#__PURE__*/React.createElement("label", {
+    className: "upload-link",
+    style: {
+      display: "inline-block",
+      marginBottom: 6
+    }
+  }, "o subir otra imagen", /*#__PURE__*/React.createElement("input", {
+    type: "file",
+    accept: "image/*",
+    style: {
+      display: "none"
+    },
+    onChange: e => {
+      const f = e.target.files[0];
+      if (f) takePhoto(f, URL.createObjectURL(f));
+    }
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "danger-zone"
+  }, !confirmDel ? /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "link-danger",
+    onClick: () => setConfirmDel(true),
+    disabled: saving
+  }, "🗑 Eliminar producto") : /*#__PURE__*/React.createElement("div", {
+    className: "cat-confirm"
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "small"
+  }, "¿Eliminar \"", product.name, "\"? Su historial de movimientos se conserva."), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "mini danger",
+    onClick: doDelete,
+    disabled: saving
+  }, "Sí, eliminar"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "mini",
+    onClick: () => setConfirmDel(false)
+  }, "Cancelar"))), /*#__PURE__*/React.createElement("div", {
+    className: "sheet-footer"
+  }, /*#__PURE__*/React.createElement("button", {
+    className: "btn btn-primary",
+    type: "submit",
+    disabled: saving || !!dup || !name.trim() || photo && photo.uploading,
+    style: {
+      marginTop: 0
+    }
+  }, saving ? "Guardando…" : "Guardar cambios")))), cameraOpen && /*#__PURE__*/React.createElement("div", {
+    className: "modal-ov",
+    style: {
+      zIndex: 60
+    },
+    onClick: () => setCameraOpen(false)
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal",
+    onClick: e => e.stopPropagation(),
+    style: {
+      padding: "18px 0 22px"
+    }
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-h",
+    style: {
+      padding: "0 18px"
+    }
+  }, /*#__PURE__*/React.createElement("span", null, "Foto del producto"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rbtn",
+    style: {
+      background: "var(--surface-2)",
+      color: "var(--ink)"
+    },
+    onClick: () => setCameraOpen(false)
+  }, "✕")), /*#__PURE__*/React.createElement(Camera, {
+    onCapture: takePhoto,
+    onCancel: () => setCameraOpen(false)
+  }))));
+}
+function ThemeModal({
+  theme,
+  onChange,
+  onClose
+}) {
+  useHideNav(true);
+  const isCustom = !THEME_PRESETS.some(p => p.id === theme.accent);
+  const current = isCustom ? "Personalizado" : THEME_PRESETS.find(p => p.id === theme.accent).name;
+  return /*#__PURE__*/React.createElement("div", {
+    className: "modal-ov",
+    onClick: onClose
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal",
+    onClick: e => e.stopPropagation()
+  }, /*#__PURE__*/React.createElement("div", {
+    className: "modal-h"
+  }, /*#__PURE__*/React.createElement("span", null, "🎨 Apariencia"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "rbtn",
+    style: {
+      background: "var(--surface-2)",
+      color: "var(--ink)"
+    },
+    onClick: onClose
+  }, "✕")), /*#__PURE__*/React.createElement("p", {
+    className: "hint",
+    style: {
+      margin: "2px 0 6px"
+    }
+  }, "Elige el color y el modo que más te gusten. Se guarda en tu cuenta y te sigue a tus otros dispositivos."), /*#__PURE__*/React.createElement("div", {
+    className: "theme-label"
+  }, "Color principal · ", current), /*#__PURE__*/React.createElement("div", {
+    className: "swatches"
+  }, THEME_PRESETS.map(p => /*#__PURE__*/React.createElement("button", {
+    key: p.id,
+    type: "button",
+    className: "swatch" + (theme.accent === p.id ? " on" : ""),
+    style: {
+      background: `linear-gradient(135deg,${p.p1},${p.p2})`
+    },
+    onClick: () => onChange({
+      ...theme,
+      accent: p.id
+    }),
+    "aria-label": p.name
+  }, theme.accent === p.id ? "✓" : "")), /*#__PURE__*/React.createElement("label", {
+    className: "swatch custom" + (isCustom ? " on" : ""),
+    style: isCustom ? {
+      background: theme.custom
+    } : undefined,
+    title: "Color personalizado"
+  }, /*#__PURE__*/React.createElement("input", {
+    type: "color",
+    value: /^#[0-9a-f]{6}$/i.test(theme.custom || "") ? theme.custom : "#4F46E5",
+    onChange: e => onChange({
+      ...theme,
+      accent: "custom",
+      custom: e.target.value
+    })
+  }), isCustom ? "✓" : "＋")), /*#__PURE__*/React.createElement("div", {
+    className: "theme-label"
+  }, "Modo"), /*#__PURE__*/React.createElement("div", {
+    className: "seg"
+  }, [["auto", "Automático"], ["light", "Claro"], ["dark", "Oscuro"]].map(([v, l]) => /*#__PURE__*/React.createElement("button", {
+    key: v,
+    type: "button",
+    className: theme.mode === v ? "on" : "",
+    onClick: () => onChange({
+      ...theme,
+      mode: v
+    })
+  }, l))), /*#__PURE__*/React.createElement("div", {
+    className: "sheet-footer"
+  }, /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "btn btn-primary",
+    style: {
+      marginTop: 0
+    },
+    onClick: onClose
+  }, "Listo"))));
+}
 function InventarioView({
   products,
   movements,
   categories,
   onAddProduct,
   onAddCategory,
+  onDeleteCategory,
+  onSaveProduct,
+  onDeleteProduct,
   onUploadPhoto,
   showToast
 }) {
@@ -696,6 +1182,9 @@ function InventarioView({
   const [showCatModal, setShowCatModal] = useState(false);
   const [newCatName, setNewCatName] = useState("");
   const [catError, setCatError] = useState("");
+  const [confirmCat, setConfirmCat] = useState(null);
+  const [editing, setEditing] = useState(null);
+  useHideNav(!!addMode || showCatModal || !!zoomUrl || !!editing);
   const catNames = categories.map(c => c.name);
   products.forEach(p => {
     if (p.category && !catNames.includes(p.category)) catNames.push(p.category);
@@ -710,6 +1199,12 @@ function InventarioView({
     setShowCatModal(false);
     setNewCatName("");
     setCatError("");
+    setConfirmCat(null);
+  }
+  async function doDeleteCat(c) {
+    const ok = await onDeleteCategory(c);
+    setConfirmCat(null);
+    if (ok && catFilter === c.name) setCatFilter("all");
   }
   async function submitCat(e) {
     e.preventDefault();
@@ -876,7 +1371,7 @@ function InventarioView({
   }), n, " ", /*#__PURE__*/React.createElement("span", null, products.filter(p => p.category === n).length))), /*#__PURE__*/React.createElement("button", {
     className: "chip chip-add",
     onClick: () => setShowCatModal(true)
-  }, "＋ Categoría")), /*#__PURE__*/React.createElement("button", {
+  }, "⚙ Categorías")), /*#__PURE__*/React.createElement("button", {
     className: "btn btn-outline",
     onClick: () => {
       setForm(f => ({
@@ -950,7 +1445,13 @@ function InventarioView({
       className: "row"
     }, /*#__PURE__*/React.createElement("span", null, "Valor en existencia"), /*#__PURE__*/React.createElement("span", {
       className: "mono"
-    }, formatMXN(p.stock * p.price))));
+    }, formatMXN(p.stock * p.price))), /*#__PURE__*/React.createElement("div", {
+      className: "kcard-actions"
+    }, /*#__PURE__*/React.createElement("button", {
+      type: "button",
+      className: "kbtn",
+      onClick: () => setEditing(p)
+    }, "✏️ Editar / ajustar existencia")));
   })))), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
@@ -983,7 +1484,13 @@ function InventarioView({
       setActivityFilter("devolucion");
       setVisibleCount(8);
     }
-  }, "Devoluciones"))), /*#__PURE__*/React.createElement("div", {
+  }, "Devoluciones"), /*#__PURE__*/React.createElement("button", {
+    className: activityFilter === "ajuste" ? "active" : "",
+    onClick: () => {
+      setActivityFilter("ajuste");
+      setVisibleCount(8);
+    }
+  }, "Ajustes"))), /*#__PURE__*/React.createElement("div", {
     className: "acts"
   }, filteredMovements.length === 0 && /*#__PURE__*/React.createElement("p", {
     className: "hint"
@@ -993,12 +1500,15 @@ function InventarioView({
       className: "act",
       key: m.id
     }, /*#__PURE__*/React.createElement("span", {
-      className: "act-ic " + (m.type === "venta" ? "sale" : "ret")
-    }, m.type === "venta" ? "↓" : "↑"), /*#__PURE__*/React.createElement("div", {
+      className: "act-ic " + (m.type === "venta" ? "sale" : m.type === "ajuste" ? "adj" : "ret")
+    }, m.type === "venta" ? "↓" : m.type === "ajuste" ? "±" : "↑"), /*#__PURE__*/React.createElement("div", {
       className: "act-text"
-    }, /*#__PURE__*/React.createElement("div", null, m.type === "venta" ? "Venta" : "Devolución", " · ", p ? p.name : "Producto eliminado", /*#__PURE__*/React.createElement("span", {
+    }, /*#__PURE__*/React.createElement("div", null, m.type === "venta" ? "Venta" : m.type === "ajuste" ? "Ajuste" : "Devolución", " · ", p ? p.name : "Producto eliminado", /*#__PURE__*/React.createElement("span", {
       className: "mono"
-    }, " ", m.type === "venta" ? "-" : "+", m.qty)), /*#__PURE__*/React.createElement("div", {
+    }, " ", (() => {
+      const s = m.type === "venta" ? -m.qty : m.qty;
+      return (s > 0 ? "+" : "") + s;
+    })())), /*#__PURE__*/React.createElement("div", {
       className: "hint small"
     }, formatDateTime(m.ts), m.type === "venta" && !!m.price && ` · ${formatMXN(m.price)} c/u · total ${formatMXN(m.total)}`, m.motivo ? ` · ${m.motivo}` : "", m.nota ? ` · "${m.nota}"` : "")));
   }), filteredMovements.length > visibleCount && /*#__PURE__*/React.createElement("button", {
@@ -1019,7 +1529,7 @@ function InventarioView({
     onSubmit: submitCat
   }, /*#__PURE__*/React.createElement("div", {
     className: "modal-h"
-  }, /*#__PURE__*/React.createElement("span", null, "Nueva categoría"), /*#__PURE__*/React.createElement("button", {
+  }, /*#__PURE__*/React.createElement("span", null, "Categorías"), /*#__PURE__*/React.createElement("button", {
     type: "button",
     className: "rbtn",
     style: {
@@ -1032,7 +1542,7 @@ function InventarioView({
     style: {
       margin: "2px 0 4px"
     }
-  }, "Crea una categoría para organizar tu inventario; después podrás elegirla al agregar productos."), /*#__PURE__*/React.createElement("label", {
+  }, "Agrega categorías nuevas o elimina las que ya no necesites."), /*#__PURE__*/React.createElement("label", {
     className: "field"
   }, /*#__PURE__*/React.createElement("span", null, "Nombre de la categoría"), /*#__PURE__*/React.createElement("input", {
     value: newCatName,
@@ -1048,8 +1558,61 @@ function InventarioView({
   }, catError)), /*#__PURE__*/React.createElement("button", {
     className: "btn btn-primary",
     type: "submit",
-    disabled: !newCatName.trim()
-  }, "Guardar categoría"))), zoomUrl && /*#__PURE__*/React.createElement("div", {
+    disabled: !newCatName.trim(),
+    style: {
+      marginTop: 0
+    }
+  }, "Agregar categoría"), /*#__PURE__*/React.createElement("div", {
+    className: "theme-label",
+    style: {
+      marginTop: 18
+    }
+  }, "Tus categorías"), /*#__PURE__*/React.createElement("div", {
+    className: "cat-list"
+  }, categories.length === 0 && /*#__PURE__*/React.createElement("p", {
+    className: "hint"
+  }, "Aún no tienes categorías."), categories.map((c, i) => {
+    const n = products.filter(p => p.category === c.name).length;
+    return /*#__PURE__*/React.createElement("div", {
+      className: "cat-row",
+      key: c.id
+    }, /*#__PURE__*/React.createElement("i", {
+      className: "chip-dot",
+      style: {
+        background: CAT_COLORS[i % CAT_COLORS.length]
+      }
+    }), /*#__PURE__*/React.createElement("div", {
+      className: "cat-row-name"
+    }, c.name, /*#__PURE__*/React.createElement("span", {
+      className: "hint small"
+    }, " · ", n, " ", n === 1 ? "producto" : "productos")), confirmCat === c.id ? /*#__PURE__*/React.createElement("div", {
+      className: "cat-confirm"
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "small"
+    }, n > 0 ? "Sus productos quedarán sin categoría. " : "", "¿Eliminar?"), /*#__PURE__*/React.createElement("button", {
+      type: "button",
+      className: "mini danger",
+      onClick: () => doDeleteCat(c)
+    }, "Sí"), /*#__PURE__*/React.createElement("button", {
+      type: "button",
+      className: "mini",
+      onClick: () => setConfirmCat(null)
+    }, "No")) : /*#__PURE__*/React.createElement("button", {
+      type: "button",
+      className: "mini danger-ghost",
+      onClick: () => setConfirmCat(c.id),
+      "aria-label": "Eliminar " + c.name
+    }, "🗑"));
+  })))), editing && /*#__PURE__*/React.createElement(EditProductModal, {
+    key: editing.id,
+    product: products.find(x => x.id === editing.id) || editing,
+    products: products,
+    categories: categories,
+    onSave: onSaveProduct,
+    onDelete: onDeleteProduct,
+    onClose: () => setEditing(null),
+    onUploadPhoto: onUploadPhoto
+  }), zoomUrl && /*#__PURE__*/React.createElement("div", {
     className: "modal-ov",
     style: {
       alignItems: "center"
@@ -1251,11 +1814,16 @@ function InventarioView({
       ...form,
       price: e.target.value
     })
-  })), /*#__PURE__*/React.createElement("button", {
+  })), /*#__PURE__*/React.createElement("div", {
+    className: "sheet-footer"
+  }, /*#__PURE__*/React.createElement("button", {
     className: "btn btn-primary",
     type: "submit",
-    disabled: saving || !!barcodeDup
-  }, saving ? "Guardando…" : "Guardar producto"))));
+    disabled: saving || !!barcodeDup,
+    style: {
+      marginTop: 0
+    }
+  }, saving ? "Guardando…" : "Guardar producto")))));
 }
 
 // ====================== CAPA DE DATOS (Supabase) ======================
@@ -1440,6 +2008,9 @@ function MainApp({
   const [businessName, setBusinessName] = useState("");
   const [tab, setTab] = useState("vender");
   const [toast, setToast] = useState(null);
+  const [theme, setTheme] = useState(loadTheme);
+  const [showTheme, setShowTheme] = useState(false);
+  const themeTimer = useRef(null);
   const businessRef = useRef(null);
   const toastTimer = useRef(null);
   const showToast = useCallback(t => {
@@ -1487,6 +2058,39 @@ function MainApp({
       clearInterval(timer);
     };
   }, []);
+  useEffect(() => {
+    const mt = session.user && session.user.user_metadata && session.user.user_metadata.theme;
+    if (mt && mt.mode && JSON.stringify(mt) !== JSON.stringify(loadTheme())) {
+      try {
+        localStorage.setItem(THEME_KEY, JSON.stringify(mt));
+      } catch (e) {}
+      applyTheme({
+        ...DEFAULT_THEME,
+        ...mt
+      });
+      setTheme({
+        ...DEFAULT_THEME,
+        ...mt
+      });
+    }
+  }, []);
+  function changeTheme(t) {
+    setTheme(t);
+    try {
+      localStorage.setItem(THEME_KEY, JSON.stringify(t));
+    } catch (e) {}
+    applyTheme(t);
+    if (themeTimer.current) clearTimeout(themeTimer.current);
+    themeTimer.current = setTimeout(() => {
+      try {
+        sb.auth.updateUser({
+          data: {
+            theme: t
+          }
+        }).catch(() => {});
+      } catch (e) {}
+    }, 700);
+  }
   const uploadProductPhoto = useCallback(async blob => {
     if (!businessRef.current) return null;
     try {
@@ -1616,6 +2220,102 @@ function MainApp({
     await loadAll();
     return true;
   }
+  async function guardarProducto(product, changes, newStock, nota) {
+    const {
+      error
+    } = await sb.from("products").update(changes).eq("id", product.id);
+    if (error) {
+      showToast({
+        kind: "info",
+        msg: error.code === "23505" ? "Ese código de barras ya existe" : "No se pudieron guardar los cambios"
+      });
+      return false;
+    }
+    if (newStock !== product.stock) {
+      const {
+        error: e2
+      } = await sb.rpc("adjust_stock", {
+        p_product: product.id,
+        p_new_stock: newStock,
+        p_nota: nota || null
+      });
+      if (e2) {
+        const {
+          error: e3
+        } = await sb.from("products").update({
+          stock: newStock
+        }).eq("id", product.id);
+        await loadAll();
+        if (e3) {
+          showToast({
+            kind: "info",
+            msg: "No se pudo actualizar la existencia"
+          });
+          return false;
+        }
+        showToast({
+          kind: "info",
+          msg: "Existencia actualizada (sin historial: falta el paso de Supabase)"
+        });
+        return true;
+      }
+    }
+    showToast({
+      kind: "info",
+      msg: "Cambios guardados"
+    });
+    await loadAll();
+    return true;
+  }
+  async function eliminarProducto(product) {
+    const {
+      error
+    } = await sb.from("products").delete().eq("id", product.id);
+    if (error) {
+      showToast({
+        kind: "info",
+        msg: "No se pudo eliminar el producto"
+      });
+      return false;
+    }
+    showToast({
+      kind: "info",
+      msg: `"${product.name}" eliminado`
+    });
+    await loadAll();
+    return true;
+  }
+  async function eliminarCategoria(cat) {
+    const {
+      error: e1
+    } = await sb.from("products").update({
+      category: ""
+    }).eq("category", cat.name);
+    if (e1) {
+      showToast({
+        kind: "info",
+        msg: "No se pudo eliminar la categoría"
+      });
+      return false;
+    }
+    const {
+      error
+    } = await sb.from("categories").delete().eq("id", cat.id);
+    if (error) {
+      showToast({
+        kind: "info",
+        msg: "No se pudo eliminar la categoría"
+      });
+      await loadAll();
+      return false;
+    }
+    showToast({
+      kind: "info",
+      msg: `Categoría "${cat.name}" eliminada`
+    });
+    await loadAll();
+    return true;
+  }
   async function agregarProducto(d) {
     const {
       error
@@ -1662,6 +2362,11 @@ function MainApp({
     className: "pill pill-off"
   }, "Sin conexión"), /*#__PURE__*/React.createElement("button", {
     className: "pill pill-btn",
+    onClick: () => setShowTheme(true),
+    "aria-label": "Apariencia",
+    title: "Apariencia"
+  }, "🎨"), /*#__PURE__*/React.createElement("button", {
+    className: "pill pill-btn",
     onClick: onLogout
   }, "Salir"))), tab === "vender" && /*#__PURE__*/React.createElement(VenderView, {
     products: products,
@@ -1674,12 +2379,19 @@ function MainApp({
     categories: categories,
     onAddProduct: agregarProducto,
     onAddCategory: agregarCategoria,
+    onDeleteCategory: eliminarCategoria,
+    onSaveProduct: guardarProducto,
+    onDeleteProduct: eliminarProducto,
     onUploadPhoto: uploadProductPhoto,
     showToast: showToast
   }), tab === "devolucion" && /*#__PURE__*/React.createElement(DevolucionView, {
     products: products,
     onDevolucion: registrarDevolucion,
     showToast: showToast
+  }), showTheme && /*#__PURE__*/React.createElement(ThemeModal, {
+    theme: theme,
+    onChange: changeTheme,
+    onClose: () => setShowTheme(false)
   }), /*#__PURE__*/React.createElement(Toast, {
     toast: toast
   }), /*#__PURE__*/React.createElement("div", {
@@ -1703,6 +2415,15 @@ function MainApp({
 }
 function Root() {
   const [session, setSession] = useState(undefined);
+  useEffect(() => {
+    if (!window.matchMedia) return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const h = () => applyTheme(loadTheme());
+    if (mq.addEventListener) mq.addEventListener("change", h);
+    return () => {
+      if (mq.removeEventListener) mq.removeEventListener("change", h);
+    };
+  }, []);
   useEffect(() => {
     sb.auth.getSession().then(({
       data
