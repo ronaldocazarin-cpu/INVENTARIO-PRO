@@ -789,6 +789,9 @@ function EditProductModal({
   const [cameraOpen, setCameraOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmDel, setConfirmDel] = useState(false);
+  const [perishable, setPerishable] = useState(!!product.perishable);
+  const [expiry, setExpiry] = useState(product.expiry || "");
+  const [newLot, setNewLot] = useState(false);
   const catNames = categories.map(c => c.name);
   if (product.category && !catNames.includes(product.category)) catNames.push(product.category);
   const dup = barcode.trim() ? products.find(p => p.id !== product.id && p.barcode === barcode.trim()) : null;
@@ -820,7 +823,7 @@ function EditProductModal({
   }
   async function submit(e) {
     e.preventDefault();
-    if (!name.trim() || dup || saving || photo && photo.uploading) return;
+    if (!name.trim() || dup || saving || photo && photo.uploading || perishable && !expiry) return;
     setSaving(true);
     const changes = {
       name: name.trim(),
@@ -830,7 +833,12 @@ function EditProductModal({
       price: Number(price) || 0
     };
     if (photo && photo.path) changes.photo_path = photo.path;
-    const ok = await onSave(product, changes, stockNum, nota.trim());
+    if (perishable || product.perishable) {
+      changes.perishable = perishable;
+      changes.expiry_date = perishable ? expiry : null;
+      if (!perishable) changes.lot_number = null;
+    }
+    const ok = await onSave(product, changes, stockNum, nota.trim(), perishable && newLot);
     setSaving(false);
     if (ok) onClose();
   }
@@ -949,7 +957,52 @@ function EditProductModal({
     value: price,
     onChange: e => setPrice(e.target.value),
     placeholder: "0.00"
-  }))), /*#__PURE__*/React.createElement("p", {
+  }))), React.createElement("div", {
+  className: "perish-box"
+}, React.createElement("div", {
+  className: "theme-label",
+  style: {
+    marginTop: 0
+  }
+}, "¿Es perecedero?"), React.createElement("div", {
+  className: "seg"
+}, React.createElement("button", {
+  type: "button",
+  className: !perishable ? "on" : "",
+  onClick: () => {
+    setPerishable(false);
+    setNewLot(false);
+  }
+}, "No"), React.createElement("button", {
+  type: "button",
+  className: perishable ? "on" : "",
+  onClick: () => setPerishable(true)
+}, "Sí")), perishable && React.createElement(React.Fragment, null, React.createElement("label", {
+  className: "field"
+}, React.createElement("span", null, "Fecha de caducidad"), React.createElement("input", {
+  type: "date",
+  value: expiry,
+  onChange: e => setExpiry(e.target.value),
+  required: true
+})), React.createElement("div", {
+  className: "lot-line"
+}, !product.lot || newLot ? "🏷️ Se asignará un número de lote al guardar" : React.createElement(React.Fragment, null, "🏷️ Lote actual: ", React.createElement("b", null, product.lot))), product.perishable && product.lot && !newLot && React.createElement("button", {
+  type: "button",
+  className: "mini",
+  style: {
+    marginBottom: 8
+  },
+  onClick: () => setNewLot(true)
+}, "Llegó mercancía nueva: registrar nuevo lote"), newLot && React.createElement("button", {
+  type: "button",
+  className: "mini",
+  style: {
+    marginBottom: 8
+  },
+  onClick: () => setNewLot(false)
+}, "Cancelar nuevo lote (seguir con ", product.lot, ")"), React.createElement("div", {
+  className: "tip"
+}, "💡 Escribe el número de lote con marcador o etiqueta en el producto o la caja para identificarlo. Si llegó mercancía nueva con otra fecha, registra un lote nuevo y cambia la fecha."))), /*#__PURE__*/React.createElement("p", {
     className: "hint",
     style: {
       margin: "4px 0 6px"
@@ -1029,7 +1082,7 @@ function EditProductModal({
   }, /*#__PURE__*/React.createElement("button", {
     className: "btn btn-primary",
     type: "submit",
-    disabled: saving || !!dup || !name.trim() || photo && photo.uploading,
+    disabled: saving || !!dup || !name.trim() || photo && photo.uploading || perishable && !expiry,
     style: {
       marginTop: 0
     }
@@ -1152,9 +1205,12 @@ function InventarioView({
   onAddProduct,
   onAddCategory,
   onDeleteCategory,
+  onDeleteCategories,
   onSaveProduct,
   onDeleteProduct,
   onUploadPhoto,
+  expiring,
+  onShowExpiry,
   showToast
 }) {
   const [query, setQuery] = useState("");
@@ -1166,7 +1222,9 @@ function InventarioView({
       stock: "",
       minStock: "",
       price: "",
-      category: ""
+      category: "",
+      perishable: false,
+      expiry: ""
     }),
     [saving, setSaving] = useState(false);
   const [photo, setPhoto] = useState(null); // {previewUrl, assetUrl, assetId, uploading, failed} — foto de perfil
@@ -1183,6 +1241,7 @@ function InventarioView({
   const [newCatName, setNewCatName] = useState("");
   const [catError, setCatError] = useState("");
   const [confirmCat, setConfirmCat] = useState(null);
+  const [confirmEmpty, setConfirmEmpty] = useState(false);
   const [editing, setEditing] = useState(null);
   useHideNav(!!addMode || showCatModal || !!zoomUrl || !!editing);
   const catNames = categories.map(c => c.name);
@@ -1200,6 +1259,13 @@ function InventarioView({
     setNewCatName("");
     setCatError("");
     setConfirmCat(null);
+    setConfirmEmpty(false);
+  }
+  const emptyCats = categories.filter(c => !products.some(p => p.category === c.name));
+  async function doDeleteEmpty() {
+    const ok = await onDeleteCategories(emptyCats);
+    setConfirmEmpty(false);
+    if (ok && emptyCats.some(c => c.name === catFilter)) setCatFilter("all");
   }
   async function doDeleteCat(c) {
     const ok = await onDeleteCategory(c);
@@ -1233,7 +1299,9 @@ function InventarioView({
       stock: "",
       minStock: "",
       price: "",
-      category: ""
+      category: "",
+      perishable: false,
+      expiry: ""
     });
     setPhoto(null);
     setBarcodeScan(null);
@@ -1300,6 +1368,13 @@ function InventarioView({
   async function submitAdd(e) {
     e.preventDefault();
     if (!form.name.trim() || saving) return;
+    if (form.perishable && !form.expiry) {
+      showToast({
+        kind: "info",
+        msg: "Elige la fecha de caducidad"
+      });
+      return;
+    }
     const dup = findDuplicateBarcode(form.barcode);
     if (dup) {
       setBarcodeDup(dup);
@@ -1317,6 +1392,8 @@ function InventarioView({
       minStock: Number(form.minStock) || 5,
       price: Number(form.price) || 0,
       category: form.category || "",
+      perishable: !!form.perishable,
+      expiry: form.perishable ? form.expiry : "",
       photoUrl: photo && photo.assetUrl || null,
       photoId: photo && photo.assetId || null
     });
@@ -1342,7 +1419,11 @@ function InventarioView({
     className: "hint"
   }, "Valor total de inventario"), /*#__PURE__*/React.createElement("span", {
     className: "mono value-amount"
-  }, formatMXN(totalValue))), /*#__PURE__*/React.createElement("div", {
+  }, formatMXN(totalValue))), expiring.length > 0 && React.createElement("button", {
+  type: "button",
+  className: "expiry-banner",
+  onClick: onShowExpiry
+}, "⚠️ ", expiring.length, " ", expiring.length === 1 ? "producto por caducar" : "productos por caducar", " · ", React.createElement("u", null, "Ver")), /*#__PURE__*/React.createElement("div", {
     className: "box"
   }, /*#__PURE__*/React.createElement("span", null, "🔍"), /*#__PURE__*/React.createElement("input", {
     placeholder: "Buscar producto o código",
@@ -1382,77 +1463,122 @@ function InventarioView({
     }
   }, "+ Nuevo producto"), groups.length === 0 && /*#__PURE__*/React.createElement("p", {
     className: "hint"
-  }, "Sin resultados."), groups.map(g => /*#__PURE__*/React.createElement("div", {
-    className: "cat-group",
-    key: g.name || "_none"
-  }, /*#__PURE__*/React.createElement("button", {
-    className: "cat-head",
-    onClick: () => setCollapsed(c => ({
-      ...c,
-      [g.name]: !c[g.name]
-    }))
-  }, /*#__PURE__*/React.createElement("span", {
-    className: "cat-dot",
-    style: {
-      background: g.color
-    }
-  }), /*#__PURE__*/React.createElement("span", {
-    className: "cat-name"
-  }, g.name || "Sin categoría"), /*#__PURE__*/React.createElement("span", {
-    className: "cat-count"
-  }, g.items.length), /*#__PURE__*/React.createElement("span", {
-    className: "cat-caret" + (collapsed[g.name] ? "" : " open")
-  }, "▾")), !collapsed[g.name] && /*#__PURE__*/React.createElement("div", {
-    className: "cards"
-  }, g.items.length === 0 && /*#__PURE__*/React.createElement("p", {
-    className: "hint",
-    style: {
-      margin: "0 4px 10px"
-    }
-  }, "Aún no hay productos en esta categoría. Agrega uno con \"+ Nuevo producto\"."), g.items.map(p => {
-    const isLow = p.stock <= p.minStock;
-    return /*#__PURE__*/React.createElement("div", {
-      className: "kcard" + (p.photoUrl ? " has-photo" : ""),
-      key: p.id
-    }, p.photoUrl && /*#__PURE__*/React.createElement("img", {
-      src: p.photoUrl,
-      className: "kcard-hero",
-      alt: p.name,
-      onClick: () => setZoomUrl(p.photoUrl)
-    }), /*#__PURE__*/React.createElement("div", {
-      className: "tab"
-    }, p.name.charAt(0)), /*#__PURE__*/React.createElement("div", {
-      className: "kcard-corner"
-    }, isLow && /*#__PURE__*/React.createElement("div", {
-      className: "stamp"
-    }, "STOCK BAJO")), /*#__PURE__*/React.createElement("div", {
-      className: "title"
-    }, p.name), /*#__PURE__*/React.createElement("div", {
-      className: "bar mono"
-    }, fmtBarcode(p.barcode)), /*#__PURE__*/React.createElement("div", {
-      className: "row"
-    }, /*#__PURE__*/React.createElement("span", null, "Existencia"), /*#__PURE__*/React.createElement("span", {
-      className: "mono " + (isLow ? "warn" : "")
-    }, p.stock)), /*#__PURE__*/React.createElement("div", {
-      className: "row"
-    }, /*#__PURE__*/React.createElement("span", null, "Mínimo"), /*#__PURE__*/React.createElement("span", {
-      className: "mono muted"
-    }, p.minStock)), !!p.price && /*#__PURE__*/React.createElement("div", {
-      className: "row"
-    }, /*#__PURE__*/React.createElement("span", null, "Precio unitario"), /*#__PURE__*/React.createElement("span", {
-      className: "mono"
-    }, formatMXN(p.price))), !!p.price && /*#__PURE__*/React.createElement("div", {
-      className: "row"
-    }, /*#__PURE__*/React.createElement("span", null, "Valor en existencia"), /*#__PURE__*/React.createElement("span", {
-      className: "mono"
-    }, formatMXN(p.stock * p.price))), /*#__PURE__*/React.createElement("div", {
-      className: "kcard-actions"
-    }, /*#__PURE__*/React.createElement("button", {
+  }, "Sin resultados."), groups.map(g => {
+    const catObj = categories.find(c => c.name === g.name);
+    if (g.items.length === 0 && g.name && !query.trim()) return /*#__PURE__*/React.createElement("div", {
+      className: "cat-group cat-empty",
+      key: g.name
+    }, /*#__PURE__*/React.createElement("div", {
+      className: "cat-head-empty"
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "cat-dot",
+      style: {
+        background: g.color
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      className: "cat-name"
+    }, g.name), /*#__PURE__*/React.createElement("span", {
+      className: "cat-count"
+    }, "0"), /*#__PURE__*/React.createElement("span", {
+      className: "hint small"
+    }, "sin productos"), catObj && (confirmCat === catObj.id ? /*#__PURE__*/React.createElement("div", {
+      className: "cat-confirm",
+      style: {
+        marginLeft: "auto"
+      }
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "small"
+    }, "¿Eliminar?"), /*#__PURE__*/React.createElement("button", {
       type: "button",
-      className: "kbtn",
-      onClick: () => setEditing(p)
-    }, "✏️ Editar / ajustar existencia")));
-  })))), /*#__PURE__*/React.createElement("div", {
+      className: "mini danger",
+      onClick: () => doDeleteCat(catObj)
+    }, "Sí"), /*#__PURE__*/React.createElement("button", {
+      type: "button",
+      className: "mini",
+      onClick: () => setConfirmCat(null)
+    }, "No")) : /*#__PURE__*/React.createElement("button", {
+      type: "button",
+      className: "mini danger-ghost",
+      style: {
+        marginLeft: "auto"
+      },
+      onClick: () => setConfirmCat(catObj.id),
+      "aria-label": "Eliminar " + g.name
+    }, "🗑"))));
+    return /*#__PURE__*/React.createElement("div", {
+      className: "cat-group",
+      key: g.name || "_none"
+    }, /*#__PURE__*/React.createElement("button", {
+      className: "cat-head",
+      onClick: () => setCollapsed(c => ({
+        ...c,
+        [g.name]: !c[g.name]
+      }))
+    }, /*#__PURE__*/React.createElement("span", {
+      className: "cat-dot",
+      style: {
+        background: g.color
+      }
+    }), /*#__PURE__*/React.createElement("span", {
+      className: "cat-name"
+    }, g.name || "Sin categoría"), /*#__PURE__*/React.createElement("span", {
+      className: "cat-count"
+    }, g.items.length), /*#__PURE__*/React.createElement("span", {
+      className: "cat-caret" + (collapsed[g.name] ? "" : " open")
+    }, "▾")), !collapsed[g.name] && /*#__PURE__*/React.createElement("div", {
+      className: "cards"
+    }, g.items.length === 0 && /*#__PURE__*/React.createElement("p", {
+      className: "hint",
+      style: {
+        margin: "0 4px 10px"
+      }
+    }, "Aún no hay productos en esta categoría. Agrega uno con \"+ Nuevo producto\"."), g.items.map(p => {
+      const isLow = p.stock <= p.minStock;
+      return /*#__PURE__*/React.createElement("div", {
+        className: "kcard" + (p.photoUrl ? " has-photo" : ""),
+        key: p.id
+      }, p.photoUrl && /*#__PURE__*/React.createElement("img", {
+        src: p.photoUrl,
+        className: "kcard-hero",
+        alt: p.name,
+        onClick: () => setZoomUrl(p.photoUrl)
+      }), /*#__PURE__*/React.createElement("div", {
+        className: "tab"
+      }, p.name.charAt(0)), /*#__PURE__*/React.createElement("div", {
+        className: "kcard-corner"
+      }, isLow && /*#__PURE__*/React.createElement("div", {
+        className: "stamp"
+      }, "STOCK BAJO")), /*#__PURE__*/React.createElement("div", {
+        className: "title"
+      }, p.name), /*#__PURE__*/React.createElement("div", {
+        className: "bar mono"
+      }, fmtBarcode(p.barcode)), /*#__PURE__*/React.createElement("div", {
+        className: "row"
+      }, /*#__PURE__*/React.createElement("span", null, "Existencia"), /*#__PURE__*/React.createElement("span", {
+        className: "mono " + (isLow ? "warn" : "")
+      }, p.stock)), /*#__PURE__*/React.createElement("div", {
+        className: "row"
+      }, /*#__PURE__*/React.createElement("span", null, "Mínimo"), /*#__PURE__*/React.createElement("span", {
+        className: "mono muted"
+      }, p.minStock)), !!p.price && /*#__PURE__*/React.createElement("div", {
+        className: "row"
+      }, /*#__PURE__*/React.createElement("span", null, "Precio unitario"), /*#__PURE__*/React.createElement("span", {
+        className: "mono"
+      }, formatMXN(p.price))), !!p.price && /*#__PURE__*/React.createElement("div", {
+        className: "row"
+      }, /*#__PURE__*/React.createElement("span", null, "Valor en existencia"), /*#__PURE__*/React.createElement("span", {
+        className: "mono"
+      }, formatMXN(p.stock * p.price))), p.perishable && p.expiry && /*#__PURE__*/React.createElement(ExpiryRows, {
+        p: p
+      }), /*#__PURE__*/React.createElement("div", {
+        className: "kcard-actions"
+      }, /*#__PURE__*/React.createElement("button", {
+        type: "button",
+        className: "kbtn",
+        onClick: () => setEditing(p)
+      }, "✏️ Editar / ajustar existencia")));
+    })));
+  }), /*#__PURE__*/React.createElement("div", {
     style: {
       display: "flex",
       alignItems: "center",
@@ -1603,7 +1729,29 @@ function InventarioView({
       onClick: () => setConfirmCat(c.id),
       "aria-label": "Eliminar " + c.name
     }, "🗑"));
-  })))), editing && /*#__PURE__*/React.createElement(EditProductModal, {
+  })), emptyCats.length > 1 && (confirmEmpty ? /*#__PURE__*/React.createElement("div", {
+    className: "cat-confirm",
+    style: {
+      margin: "12px 0 0"
+    }
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "small"
+  }, "¿Eliminar ", emptyCats.length, " categorías sin productos?"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "mini danger",
+    onClick: doDeleteEmpty
+  }, "Sí, eliminar"), /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "mini",
+    onClick: () => setConfirmEmpty(false)
+  }, "No")) : /*#__PURE__*/React.createElement("button", {
+    type: "button",
+    className: "btn btn-outline",
+    style: {
+      margin: "12px 0 0"
+    },
+    onClick: () => setConfirmEmpty(true)
+  }, "🧹 Quitar las ", emptyCats.length, " categorías sin productos")))), editing && /*#__PURE__*/React.createElement(EditProductModal, {
     key: editing.id,
     product: products.find(x => x.id === editing.id) || editing,
     products: products,
@@ -1814,7 +1962,43 @@ function InventarioView({
       ...form,
       price: e.target.value
     })
-  })), /*#__PURE__*/React.createElement("div", {
+  })), React.createElement("div", {
+  className: "perish-box"
+}, React.createElement("div", {
+  className: "theme-label",
+  style: {
+    marginTop: 0
+  }
+}, "¿Es perecedero?"), React.createElement("div", {
+  className: "seg"
+}, React.createElement("button", {
+  type: "button",
+  className: !form.perishable ? "on" : "",
+  onClick: () => setForm({
+    ...form,
+    perishable: false,
+    expiry: ""
+  })
+}, "No"), React.createElement("button", {
+  type: "button",
+  className: form.perishable ? "on" : "",
+  onClick: () => setForm({
+    ...form,
+    perishable: true
+  })
+}, "Sí")), form.perishable && React.createElement(React.Fragment, null, React.createElement("label", {
+  className: "field"
+}, React.createElement("span", null, "Fecha de caducidad"), React.createElement("input", {
+  type: "date",
+  value: form.expiry,
+  onChange: e => setForm({
+    ...form,
+    expiry: e.target.value
+  }),
+  required: true
+})), React.createElement("div", {
+  className: "tip"
+}, "🏷️ Al guardar, la app le asigna un ", React.createElement("b", null, "número de lote"), ".", React.createElement("br", null), "💡 Te recomiendo escribirlo con marcador o etiqueta directamente en el producto o en la caja para identificarlo físicamente. Te aviso 7 días antes de que caduque."))), /*#__PURE__*/React.createElement("div", {
     className: "sheet-footer"
   }, /*#__PURE__*/React.createElement("button", {
     className: "btn btn-primary",
@@ -1855,6 +2039,168 @@ function blobToBase64(blob) {
     r.readAsDataURL(blob);
   });
 }
+const EXP_KEY = "kardex-exp-alert-day";
+function expiryInfo(p) {
+  if (!p.perishable || !p.expiry) return null;
+  const [y, m, d] = p.expiry.split("-").map(Number);
+  const exp = new Date(y, m - 1, d);
+  const t = new Date();
+  const today = new Date(t.getFullYear(), t.getMonth(), t.getDate());
+  return {
+    days: Math.round((exp - today) / 86400000),
+    date: exp
+  };
+}
+function fmtExpiry(info) {
+  return info.date.toLocaleDateString("es-MX", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric"
+  });
+}
+function daysText(d) {
+  if (d < 0) return "caducó hace " + -d + (d === -1 ? " día" : " días");
+  if (d === 0) return "caduca hoy";
+  if (d === 1) return "caduca mañana";
+  return "caduca en " + d + " días";
+}
+function expiringProducts(list) {
+  return list.filter(p => p.stock > 0).map(p => ({
+    p,
+    info: expiryInfo(p)
+  })).filter(x => x.info && x.info.days <= 7).sort((a, b) => a.info.days - b.info.days);
+}
+function todayKey() {
+  const t = new Date();
+  return t.getFullYear() + "-" + (t.getMonth() + 1) + "-" + t.getDate();
+}
+function ExpiryRows({
+  p
+}) {
+  const info = expiryInfo(p);
+  if (!info) return null;
+  const cls = info.days < 0 ? "bad" : info.days <= 7 ? "soon" : "ok";
+  return React.createElement(React.Fragment, null, React.createElement("div", {
+    className: "row"
+  }, React.createElement("span", null, "Caducidad"), React.createElement("span", {
+    className: "mono exp " + cls
+  }, fmtExpiry(info), " · ", daysText(info.days))), React.createElement("div", {
+    className: "row"
+  }, React.createElement("span", null, "Lote"), React.createElement("span", {
+    className: "mono"
+  }, p.lot || "—")));
+}
+function ExpiryAlertModal({
+  items,
+  onClose
+}) {
+  useHideNav(true);
+  return React.createElement("div", {
+    className: "modal-ov",
+    style: {
+      zIndex: 50
+    },
+    onClick: onClose
+  }, React.createElement("div", {
+    className: "modal",
+    onClick: e => e.stopPropagation()
+  }, React.createElement("div", {
+    className: "modal-h"
+  }, React.createElement("span", null, "⏰ Productos por caducar"), React.createElement("button", {
+    type: "button",
+    className: "rbtn",
+    style: {
+      background: "var(--surface-2)",
+      color: "var(--ink)"
+    },
+    onClick: onClose
+  }, "✕")), React.createElement("div", {
+    className: "alert-list"
+  }, items.length === 0 && React.createElement("p", {
+    className: "hint"
+  }, "Todo en orden: ningún producto caduca en los próximos 7 días. ✅"), items.map(({
+    p,
+    info
+  }) => {
+    const expired = info.days < 0;
+    const cat = p.category || "Sin categoría";
+    const lot = p.lot ? "con número de lote " + p.lot : "sin número de lote asignado";
+    return React.createElement("div", {
+      className: "alert-card" + (expired ? " expired" : ""),
+      key: p.id
+    }, React.createElement("div", {
+      className: "alert-title"
+    }, expired ? "⛔" : "⚠️", " ", p.name, " ", React.createElement("span", {
+      className: "chip-mini"
+    }, cat)), React.createElement("p", null, expired ? React.createElement(React.Fragment, null, "El producto ", React.createElement("b", null, p.name), " de la categoría ", React.createElement("b", null, cat), ", ", lot, ", ", React.createElement("b", null, daysText(info.days)), ". Retíralo de la venta cuanto antes.") : React.createElement(React.Fragment, null, "El producto ", React.createElement("b", null, p.name), " de la categoría ", React.createElement("b", null, cat), ", ", lot, ", está por caducar (", React.createElement("b", null, daysText(info.days).replace("caduca ", "")), ", el ", fmtExpiry(info), "). Te recomiendo rotarlo cuanto antes.")), React.createElement("div", {
+      className: "alert-meta"
+    }, p.lot ? "Lote " + p.lot + " · " : "", p.stock, " en existencia"));
+  })), React.createElement("div", {
+    className: "sheet-footer"
+  }, React.createElement("button", {
+    type: "button",
+    className: "btn btn-primary",
+    style: {
+      marginTop: 0
+    },
+    onClick: onClose
+  }, "Entendido"))));
+}
+function LotModal({
+  info,
+  onClose
+}) {
+  useHideNav(true);
+  const [y, m, d] = (info.expiry || "").split("-").map(Number);
+  const dateTxt = info.expiry ? new Date(y, m - 1, d).toLocaleDateString("es-MX", {
+    day: "2-digit",
+    month: "long",
+    year: "numeric"
+  }) : "";
+  return React.createElement("div", {
+    className: "modal-ov",
+    style: {
+      zIndex: 70
+    },
+    onClick: onClose
+  }, React.createElement("div", {
+    className: "modal",
+    onClick: e => e.stopPropagation(),
+    style: {
+      textAlign: "center"
+    }
+  }, React.createElement("div", {
+    style: {
+      fontSize: 40
+    }
+  }, "🏷️"), React.createElement("div", {
+    className: "modal-h",
+    style: {
+      justifyContent: "center"
+    }
+  }, React.createElement("span", null, "Lote asignado")), React.createElement("div", {
+    className: "lot-code"
+  }, info.lot), React.createElement("p", {
+    className: "hint",
+    style: {
+      margin: "4px 0 12px"
+    }
+  }, info.name, dateTxt ? " · caduca el " + dateTxt : ""), React.createElement("div", {
+    className: "tip",
+    style: {
+      textAlign: "left"
+    }
+  }, "💡 Te recomiendo ", React.createElement("b", null, "escribir este número de lote"), " con marcador o etiqueta directamente en el producto o en la caja, para identificarlo físicamente y rotarlo a tiempo. Te aviso 7 días antes de que caduque."), React.createElement("div", {
+    className: "sheet-footer"
+  }, React.createElement("button", {
+    type: "button",
+    className: "btn btn-primary",
+    style: {
+      marginTop: 0
+    },
+    onClick: onClose
+  }, "Entendido"))));
+}
 function mapProduct(r) {
   return {
     id: r.id,
@@ -1865,6 +2211,9 @@ function mapProduct(r) {
     minStock: r.min_stock,
     price: Number(r.price) || 0,
     photoPath: r.photo_path || null,
+    perishable: !!r.perishable,
+    expiry: r.expiry_date || "",
+    lot: r.lot_number || "",
     photoUrl: r.photo_path ? sb.storage.from("product-photos").getPublicUrl(r.photo_path).data.publicUrl : null
   };
 }
@@ -2010,6 +2359,10 @@ function MainApp({
   const [toast, setToast] = useState(null);
   const [theme, setTheme] = useState(loadTheme);
   const [showTheme, setShowTheme] = useState(false);
+  const [lotInfo, setLotInfo] = useState(null);
+  const [showExpiry, setShowExpiry] = useState(false);
+  const alertedRef = useRef(false);
+  const expiring = expiringProducts(products);
   const themeTimer = useRef(null);
   const businessRef = useRef(null);
   const toastTimer = useRef(null);
@@ -2220,7 +2573,42 @@ function MainApp({
     await loadAll();
     return true;
   }
-  async function guardarProducto(product, changes, newStock, nota) {
+useEffect(() => {
+  if (dbState !== "ready" || alertedRef.current) return;
+  alertedRef.current = true;
+  if (!expiringProducts(products).length) return;
+  const key = todayKey();
+  let last = null;
+  try {
+    last = localStorage.getItem(EXP_KEY);
+  } catch (e) {}
+  if (last !== key) {
+    setShowExpiry(true);
+    try {
+      localStorage.setItem(EXP_KEY, key);
+    } catch (e) {}
+  }
+}, [dbState, products]);
+async function asignarLote() {
+  const {
+    data,
+    error
+  } = await sb.rpc("next_lot");
+  if (error || !data) return null;
+  return String(data);
+}  async function guardarProducto(product, changes, newStock, nota, newLot) {
+    let lotAssigned = null;
+    if (changes.perishable && (newLot || !product.lot)) {
+      lotAssigned = await asignarLote();
+      if (!lotAssigned) {
+        showToast({
+          kind: "info",
+          msg: "Falta ejecutar la actualización de Supabase (lotes)"
+        });
+        return false;
+      }
+      changes.lot_number = lotAssigned;
+    }
     const {
       error
     } = await sb.from("products").update(changes).eq("id", product.id);
@@ -2231,6 +2619,11 @@ function MainApp({
       });
       return false;
     }
+    if (lotAssigned) setLotInfo({
+      name: changes.name || product.name,
+      lot: lotAssigned,
+      expiry: changes.expiry_date
+    });
     if (newStock !== product.stock) {
       const {
         error: e2
@@ -2263,6 +2656,25 @@ function MainApp({
     showToast({
       kind: "info",
       msg: "Cambios guardados"
+    });
+    await loadAll();
+    return true;
+  }
+  async function eliminarCategorias(cats) {
+    if (!cats.length) return true;
+    const {
+      error
+    } = await sb.from("categories").delete().in("id", cats.map(c => c.id));
+    if (error) {
+      showToast({
+        kind: "info",
+        msg: "No se pudieron eliminar las categorías"
+      });
+      return false;
+    }
+    showToast({
+      kind: "info",
+      msg: `${cats.length} categorías eliminadas`
     });
     await loadAll();
     return true;
@@ -2317,9 +2729,7 @@ function MainApp({
     return true;
   }
   async function agregarProducto(d) {
-    const {
-      error
-    } = await sb.from("products").insert({
+    const row = {
       name: d.name,
       barcode: d.barcode,
       category: d.category || "",
@@ -2327,7 +2737,24 @@ function MainApp({
       min_stock: d.minStock,
       price: d.price,
       photo_path: d.photoId || null
-    });
+    };
+    let lot = null;
+    if (d.perishable) {
+      lot = await asignarLote();
+      if (!lot) {
+        showToast({
+          kind: "info",
+          msg: "Falta ejecutar la actualización de Supabase (lotes)"
+        });
+        return false;
+      }
+      row.perishable = true;
+      row.expiry_date = d.expiry;
+      row.lot_number = lot;
+    }
+    const {
+      error
+    } = await sb.from("products").insert(row);
     if (error) {
       showToast({
         kind: "info",
@@ -2338,6 +2765,11 @@ function MainApp({
     showToast({
       kind: "info",
       msg: "Producto agregado al catálogo"
+    });
+    if (lot) setLotInfo({
+      name: d.name,
+      lot,
+      expiry: d.expiry
     });
     await loadAll();
     return true;
@@ -2360,7 +2792,14 @@ function MainApp({
     className: "pill pill-wait"
   }, "Conectando…"), dbState === "unavailable" && /*#__PURE__*/React.createElement("span", {
     className: "pill pill-off"
-  }, "Sin conexión"), /*#__PURE__*/React.createElement("button", {
+  }, "Sin conexión"), expiring.length > 0 && React.createElement("button", {
+  className: "pill pill-btn bell",
+  onClick: () => setShowExpiry(true),
+  "aria-label": "Alertas de caducidad",
+  title: "Productos por caducar"
+}, "🔔", React.createElement("span", {
+  className: "badge"
+}, expiring.length)), /*#__PURE__*/React.createElement("button", {
     className: "pill pill-btn",
     onClick: () => setShowTheme(true),
     "aria-label": "Apariencia",
@@ -2380,15 +2819,24 @@ function MainApp({
     onAddProduct: agregarProducto,
     onAddCategory: agregarCategoria,
     onDeleteCategory: eliminarCategoria,
+    onDeleteCategories: eliminarCategorias,
     onSaveProduct: guardarProducto,
     onDeleteProduct: eliminarProducto,
     onUploadPhoto: uploadProductPhoto,
+    expiring: expiring,
+    onShowExpiry: () => setShowExpiry(true),
     showToast: showToast
   }), tab === "devolucion" && /*#__PURE__*/React.createElement(DevolucionView, {
     products: products,
     onDevolucion: registrarDevolucion,
     showToast: showToast
-  }), showTheme && /*#__PURE__*/React.createElement(ThemeModal, {
+  }), showExpiry && React.createElement(ExpiryAlertModal, {
+  items: expiring,
+  onClose: () => setShowExpiry(false)
+}), lotInfo && React.createElement(LotModal, {
+  info: lotInfo,
+  onClose: () => setLotInfo(null)
+}), showTheme && /*#__PURE__*/React.createElement(ThemeModal, {
     theme: theme,
     onChange: changeTheme,
     onClose: () => setShowTheme(false)
