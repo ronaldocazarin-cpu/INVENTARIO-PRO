@@ -109,6 +109,43 @@ function applyTheme(t) {
   if (meta) meta.setAttribute("content", p1);
 }
 applyTheme(loadTheme());
+
+// ---------- Enlaces con etiqueta (?ref=grupo-abarrotes) ----------
+function sanitizeRef(v) {
+  return String(v || "").toLowerCase().replace(/[^a-z0-9_-]/g, "").slice(0, 40);
+}
+function getStoredRef() {
+  try {
+    return localStorage.getItem("kardex-ref") || undefined;
+  } catch (e) {
+    return undefined;
+  }
+}
+function newVisitorId() {
+  try {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  } catch (e) {}
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === "x" ? r : r & 3 | 8).toString(16);
+  });
+}
+(function trackLinkRef() {
+  try {
+    const ref = sanitizeRef(new URLSearchParams(location.search).get("ref"));
+    if (!ref) return;
+    if (!localStorage.getItem("kardex-ref")) localStorage.setItem("kardex-ref", ref);
+    let vid = localStorage.getItem("kardex-vid");
+    if (!vid) {
+      vid = newVisitorId();
+      localStorage.setItem("kardex-vid", vid);
+    }
+    Promise.resolve(sb.rpc("track_visit", {
+      p_ref: ref,
+      p_visitor: vid
+    })).catch(() => {});
+  } catch (e) {}
+})();
 const DEFAULT_CATEGORIES = ["Bebidas", "Botanas y galletas", "Panadería", "Lácteos y huevo", "Abarrotes", "Limpieza y hogar"];
 const CAT_COLORS = ["#4F46E5", "#F59E0B", "#EF5B6B", "#0EA5E9", "#10B981", "#A855F7", "#EC4899", "#14B8A6"];
 const MOTIVOS = ["Producto defectuoso", "Cliente se arrepintió", "Producto equivocado", "Empaque dañado", "Otro"];
@@ -340,6 +377,14 @@ function VenderView({
   const [qty, setQty] = useState(1);
   const [busy, setBusy] = useState(false);
   const inputRef = useRef(null);
+  const [payment, setPayment] = useState(() => {
+    try {
+      return localStorage.getItem("kardex-pay") || "efectivo";
+    } catch (e) {
+      return "efectivo";
+    }
+  });
+  const [folio, setFolio] = useState("");
   useHideNav(mode === "camera");
   useEffect(() => {
     if (mode === "scan" && inputRef.current) inputRef.current.focus();
@@ -351,6 +396,7 @@ function VenderView({
     setSel(null);
     setQty(1);
     setBusy(false);
+    setFolio("");
   }
   function submitBarcode(e) {
     e.preventDefault();
@@ -386,7 +432,13 @@ function VenderView({
   async function confirmSale() {
     if (!sel || busy) return;
     setBusy(true);
-    await onVenta(sel.id, qty);
+    try {
+      localStorage.setItem("kardex-pay", payment);
+    } catch (e) {}
+    await onVenta(sel.id, qty, {
+      payment,
+      folio: folio.trim()
+    });
     reset();
   }
   if (mode === "choose") return /*#__PURE__*/React.createElement("div", {
@@ -591,7 +643,34 @@ function VenderView({
     onCancel: reset,
     label: "Confirmar venta",
     color: "red",
-    busy: busy
+    busy: busy,
+    extra: React.createElement(React.Fragment, null, sel.price > 0 && React.createElement("div", {
+  className: "total-due"
+}, React.createElement("span", null, "Total a cobrar"), React.createElement("b", {
+  className: "mono"
+}, formatMXN(sel.price * qty))), React.createElement("div", {
+  className: "theme-label",
+  style: {
+    marginTop: 8
+  }
+}, "Forma de pago"), React.createElement("div", {
+  className: "seg pay-seg"
+}, [["efectivo", "💵 Efectivo"], ["tarjeta", "💳 Tarjeta"], ["transferencia", "🏦 Transf."]].map(([v, l]) => React.createElement("button", {
+  key: v,
+  type: "button",
+  className: payment === v ? "on" : "",
+  onClick: () => setPayment(v)
+}, l))), React.createElement("label", {
+  className: "field",
+  style: {
+    margin: "8px 0 4px"
+  }
+}, React.createElement("span", null, "Folio o nota de venta (opcional)"), React.createElement("input", {
+  value: folio,
+  maxLength: 40,
+  onChange: e => setFolio(e.target.value),
+  placeholder: "Ej. A-1001"
+})))
   }));
   return null;
 }
@@ -1116,6 +1195,230 @@ function EditProductModal({
     onCancel: () => setCameraOpen(false)
   }))));
 }
+function FeedbackModal({
+  onSend,
+  onClose
+}) {
+  useHideNav(true);
+  const [kind, setKind] = useState("idea");
+  const [text, setText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const kinds = [["idea", "💡 Idea"], ["problema", "🐞 Problema"], ["me_gusta", "👍 Me gusta"]];
+  const prompts = {
+    idea: "¿Qué te gustaría que Kardex hiciera?",
+    problema: "¿Qué pasó? Cuéntame qué intentabas hacer.",
+    me_gusta: "¿Qué te gustó de Kardex?"
+  };
+  async function send() {
+    if (!text.trim() || busy) return;
+    setBusy(true);
+    setErr("");
+    const ok = await onSend(kind, text.trim());
+    setBusy(false);
+    if (ok) onClose();else setErr("No se pudo enviar. Revisa tu conexión e inténtalo de nuevo.");
+  }
+  return React.createElement("div", {
+    className: "modal-ov",
+    style: {
+      zIndex: 60
+    },
+    onClick: () => !busy && onClose()
+  }, React.createElement("div", {
+    className: "modal",
+    onClick: e => e.stopPropagation()
+  }, React.createElement("div", {
+    className: "modal-h"
+  }, React.createElement("span", null, "💬 Enviar comentarios"), React.createElement("button", {
+    type: "button",
+    className: "rbtn",
+    style: {
+      background: "var(--surface-2)",
+      color: "var(--ink)"
+    },
+    onClick: onClose,
+    disabled: busy
+  }, "✕")), React.createElement("p", {
+    className: "hint",
+    style: {
+      margin: "2px 0 10px"
+    }
+  }, "Tu opinión me ayuda a mejorar Kardex. Llega junto con tu cuenta, así puedo contestarte."), React.createElement("div", {
+    className: "seg"
+  }, kinds.map(([v, l]) => React.createElement("button", {
+    key: v,
+    type: "button",
+    className: kind === v ? "on" : "",
+    onClick: () => setKind(v)
+  }, l))), React.createElement("label", {
+    className: "field"
+  }, React.createElement("span", null, prompts[kind]), React.createElement("textarea", {
+    rows: 5,
+    maxLength: 2000,
+    value: text,
+    onChange: e => setText(e.target.value),
+    placeholder: "Escribe aquí…"
+  })), React.createElement("div", {
+    className: "hint small",
+    style: {
+      textAlign: "right"
+    }
+  }, text.length, "/2000"), err && React.createElement("div", {
+    className: "msg err",
+    style: {
+      marginTop: 8
+    }
+  }, err), React.createElement("div", {
+    className: "sheet-footer"
+  }, React.createElement("button", {
+    type: "button",
+    className: "btn btn-primary",
+    style: {
+      marginTop: 0
+    },
+    onClick: send,
+    disabled: busy || !text.trim()
+  }, busy ? "Enviando…" : "Enviar comentario"))));
+}
+function SettingsModal({
+  settings,
+  defaultEmail,
+  onSave,
+  onTest,
+  onOpenFeedback,
+  onClose
+}) {
+  useHideNav(true);
+  const [enabled, setEnabled] = useState(!!settings.enabled);
+  const [email, setEmail] = useState(settings.email || defaultEmail || "");
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [msg, setMsg] = useState(null);
+  const valid = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email.trim());
+  const dirty = enabled !== !!settings.enabled || email.trim() !== (settings.email || "");
+  async function save() {
+    if (enabled && !valid) {
+      setMsg({
+        kind: "err",
+        text: "Escribe un correo válido para recibir los avisos."
+      });
+      return;
+    }
+    setSaving(true);
+    setMsg(null);
+    const ok = await onSave(valid ? email.trim() : "", enabled);
+    setSaving(false);
+    setMsg(ok ? {
+      kind: "ok",
+      text: enabled ? "Listo. Te avisaremos por correo cada mañana." : "Guardado. Los avisos por correo están desactivados."
+    } : {
+      kind: "err",
+      text: "No se pudo guardar. Revisa tu conexión e inténtalo de nuevo."
+    });
+  }
+  async function test() {
+    if (!valid) {
+      setMsg({
+        kind: "err",
+        text: "Escribe un correo válido primero."
+      });
+      return;
+    }
+    setTesting(true);
+    setMsg(null);
+    const r = await onTest(email.trim(), enabled);
+    setTesting(false);
+    const texts = {
+      missing_key: "Todavía falta conectar el servicio de correo (la llave de Resend). Es un paso de configuración pendiente.",
+      too_soon: "Espera un minuto antes de pedir otra prueba.",
+      no_email: "Guarda primero un correo.",
+      save: "No se pudo guardar el correo. Inténtalo de nuevo.",
+      other: "No se pudo enviar la prueba. Inténtalo de nuevo."
+    };
+    setMsg(r.ok ? {
+      kind: "ok",
+      text: "Enviada. Revisa tu bandeja en unos segundos (y la carpeta de spam)."
+    } : {
+      kind: "err",
+      text: texts[r.code] || texts.other
+    });
+  }
+  return React.createElement("div", {
+    className: "modal-ov",
+    onClick: onClose
+  }, React.createElement("div", {
+    className: "modal",
+    onClick: e => e.stopPropagation()
+  }, React.createElement("div", {
+    className: "modal-h"
+  }, React.createElement("span", null, "⚙️ Configuración"), React.createElement("button", {
+    type: "button",
+    className: "rbtn",
+    style: {
+      background: "var(--surface-2)",
+      color: "var(--ink)"
+    },
+    onClick: onClose
+  }, "✕")), React.createElement("div", {
+    className: "theme-label"
+  }, "Avisos de caducidad por correo"), React.createElement("label", {
+    className: "switch-row"
+  }, React.createElement("span", null, React.createElement("b", null, "Avisarme por correo"), React.createElement("small", null, "Cuando un producto perecedero esté por caducar.")), React.createElement("input", {
+    type: "checkbox",
+    className: "switch",
+    checked: enabled,
+    onChange: e => {
+      setEnabled(e.target.checked);
+      setMsg(null);
+    }
+  })), React.createElement("label", {
+    className: "field"
+  }, React.createElement("span", null, "Correo para avisos"), React.createElement("input", {
+    type: "email",
+    inputMode: "email",
+    value: email,
+    placeholder: "tucorreo@ejemplo.com",
+    autoComplete: "email",
+    onChange: e => {
+      setEmail(e.target.value);
+      setMsg(null);
+    }
+  })), React.createElement("div", {
+    className: "tip"
+  }, "⏰ Te escribo por la mañana (7 a 8 am, hora de Tijuana) cuando a un producto le falten ", React.createElement("b", null, "7, 3 o 1 día"), ", el ", React.createElement("b", null, "día que caduca"), " y al día siguiente. Cada aviso trae el ", React.createElement("b", null, "nombre, la categoría y el número de lote"), ", y recomienda rotarlo cuanto antes."), msg && React.createElement("div", {
+    className: "msg " + msg.kind,
+    style: {
+      marginTop: 10
+    }
+  }, msg.text), React.createElement("button", {
+    type: "button",
+    className: "btn btn-outline",
+    style: {
+      margin: "12px 0 0"
+    },
+    onClick: test,
+    disabled: testing || saving
+  }, testing ? "Enviando…" : "✉️ Enviar correo de prueba"), React.createElement("button", {
+  type: "button",
+  className: "btn btn-ghost",
+  style: {
+    margin: "8px 0 0",
+    width: "100%",
+    flex: "none"
+  },
+  onClick: onOpenFeedback
+}, "💬 Enviar comentarios sobre Kardex"), React.createElement("div", {
+    className: "sheet-footer"
+  }, React.createElement("button", {
+    type: "button",
+    className: "btn btn-primary",
+    style: {
+      marginTop: 0
+    },
+    onClick: save,
+    disabled: saving || testing || !dirty
+  }, saving ? "Guardando…" : "Guardar"))));
+}
 function ThemeModal({
   theme,
   onChange,
@@ -1211,6 +1514,7 @@ function InventarioView({
   onUploadPhoto,
   expiring,
   onShowExpiry,
+  onOpenFeedback,
   showToast
 }) {
   const [query, setQuery] = useState("");
@@ -1636,14 +1940,18 @@ function InventarioView({
       return (s > 0 ? "+" : "") + s;
     })())), /*#__PURE__*/React.createElement("div", {
       className: "hint small"
-    }, formatDateTime(m.ts), m.type === "venta" && !!m.price && ` · ${formatMXN(m.price)} c/u · total ${formatMXN(m.total)}`, m.motivo ? ` · ${m.motivo}` : "", m.nota ? ` · "${m.nota}"` : "")));
+    }, formatDateTime(m.ts), m.type === "venta" && !!m.price && ` · ${formatMXN(m.price)} c/u · total ${formatMXN(m.total)}`, m.type === "venta" && m.payment ? ` · ${PAY_LABEL[m.payment]}` : "", m.type === "venta" && m.folio ? ` · Folio ${m.folio}` : "", m.motivo ? ` · ${m.motivo}` : "", m.nota ? ` · "${m.nota}"` : "")));
   }), filteredMovements.length > visibleCount && /*#__PURE__*/React.createElement("button", {
     className: "back",
     style: {
       alignSelf: "center"
     },
     onClick: () => setVisibleCount(v => v + 8)
-  }, "Mostrar más")), showCatModal && /*#__PURE__*/React.createElement("div", {
+  }, "Mostrar más")), React.createElement("button", {
+  type: "button",
+  className: "link-feedback",
+  onClick: onOpenFeedback
+}, "💬 ¿Algo que mejorar? Cuéntanos"), showCatModal && /*#__PURE__*/React.createElement("div", {
     className: "modal-ov",
     style: {
       zIndex: 40
@@ -2227,7 +2535,9 @@ function mapMovement(r) {
     price: r.price == null ? null : Number(r.price),
     total: r.total == null ? null : Number(r.total),
     motivo: r.motivo,
-    nota: r.nota
+    nota: r.nota,
+    payment: r.payment_method || null,
+    folio: r.folio || null
   };
 }
 function authErrorText(err) {
@@ -2269,7 +2579,8 @@ function AuthScreen() {
           password,
           options: {
             data: {
-              business_name: business.trim() || "Mi negocio"
+              business_name: business.trim() || "Mi negocio",
+              ref: getStoredRef()
             }
           }
         });
@@ -2346,6 +2657,214 @@ function AuthScreen() {
     disabled: busy
   }, busy ? "Un momento…" : mode === "login" ? "Entrar" : "Crear mi cuenta")));
 }
+const PAY_LABEL = {
+  efectivo: "💵 Efectivo",
+  tarjeta: "💳 Tarjeta",
+  transferencia: "🏦 Transferencia"
+};
+function localDayKey(d) {
+  return d.getFullYear() + "-" + String(d.getMonth() + 1).padStart(2, "0") + "-" + String(d.getDate()).padStart(2, "0");
+}
+function CorteView({
+  products,
+  businessName,
+  showToast
+}) {
+  const todayKey = localDayKey(new Date());
+  const [day, setDay] = useState(todayKey);
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(false);
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(false);
+    const [y, m, d] = day.split("-").map(Number);
+    const start = new Date(y, m - 1, d, 0, 0, 0, 0),
+      end = new Date(y, m - 1, d + 1, 0, 0, 0, 0);
+    try {
+      const {
+        data,
+        error: err
+      } = await sb.from("movements").select("*").in("type", ["venta", "devolucion"]).gte("created_at", start.toISOString()).lt("created_at", end.toISOString()).order("created_at", {
+        ascending: false
+      }).limit(2000);
+      if (err) throw err;
+      setRows(data.map(mapMovement));
+    } catch (e) {
+      setError(true);
+      setRows([]);
+    }
+    setLoading(false);
+  }, [day]);
+  useEffect(() => {
+    load();
+  }, [load]);
+  const [y, m, d] = day.split("-").map(Number);
+  const dayLabel = new Date(y, m - 1, d).toLocaleDateString("es-MX", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric"
+  });
+  const isToday = day === todayKey;
+  function shift(n) {
+    const nd = new Date(y, m - 1, d + n);
+    const k = localDayKey(nd);
+    if (k <= todayKey) setDay(k);
+  }
+  const ventas = rows.filter(r => r.type === "venta");
+  const devs = rows.filter(r => r.type === "devolucion");
+  const methods = ["efectivo", "tarjeta", "transferencia"];
+  const by = {};
+  [...methods, "sin"].forEach(k => {
+    by[k] = {
+      amount: 0,
+      count: 0,
+      pieces: 0
+    };
+  });
+  ventas.forEach(v => {
+    const k = methods.includes(v.payment) ? v.payment : "sin";
+    by[k].amount += v.total || 0;
+    by[k].count += 1;
+    by[k].pieces += v.qty;
+  });
+  const total = ventas.reduce((s, v) => s + (v.total || 0), 0);
+  const pieces = ventas.reduce((s, v) => s + v.qty, 0);
+  const devPieces = devs.reduce((s, v) => s + v.qty, 0);
+  function summaryText() {
+    const lines = ["Corte del día " + dayLabel + (businessName ? " · " + businessName : ""), "Total vendido: " + formatMXN(total) + " (" + ventas.length + (ventas.length === 1 ? " venta" : " ventas") + ", " + pieces + " piezas)"];
+    methods.forEach(k => lines.push(PAY_LABEL[k] + ": " + formatMXN(by[k].amount) + " (" + by[k].count + ")"));
+    if (by.sin.count > 0) lines.push("Sin forma de pago: " + formatMXN(by.sin.amount) + " (" + by.sin.count + ")");
+    if (devs.length > 0) lines.push("Devoluciones: " + devs.length + " (" + devPieces + (devPieces === 1 ? " pieza" : " piezas") + ", no se restan de los totales)");
+    return lines.join("\n");
+  }
+  async function copy() {
+    const text = summaryText();
+    try {
+      await navigator.clipboard.writeText(text);
+      showToast({
+        kind: "info",
+        msg: "Resumen copiado"
+      });
+    } catch (e) {
+      try {
+        const ta = document.createElement("textarea");
+        ta.value = text;
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand("copy");
+        document.body.removeChild(ta);
+        showToast({
+          kind: "info",
+          msg: "Resumen copiado"
+        });
+      } catch (e2) {
+        showToast({
+          kind: "info",
+          msg: "No se pudo copiar"
+        });
+      }
+    }
+  }
+  return React.createElement("div", {
+    className: "pad"
+  }, React.createElement("div", {
+    className: "corte-nav"
+  }, React.createElement("button", {
+    type: "button",
+    className: "mini",
+    onClick: () => shift(-1),
+    "aria-label": "Día anterior"
+  }, "◀"), React.createElement("input", {
+    type: "date",
+    className: "corte-date",
+    value: day,
+    max: todayKey,
+    onChange: e => {
+      if (e.target.value && e.target.value <= todayKey) setDay(e.target.value);
+    }
+  }), React.createElement("button", {
+    type: "button",
+    className: "mini",
+    onClick: () => shift(1),
+    disabled: isToday,
+    "aria-label": "Día siguiente"
+  }, "▶"), React.createElement("button", {
+    type: "button",
+    className: "mini",
+    onClick: load,
+    "aria-label": "Actualizar"
+  }, "↻")), React.createElement("p", {
+    className: "hint",
+    style: {
+      margin: "4px 2px 10px",
+      textTransform: "capitalize"
+    }
+  }, isToday ? "Hoy · " : "", dayLabel), error && React.createElement("div", {
+    className: "msg err"
+  }, "No se pudo cargar el corte. Revisa tu conexión y toca ↻."), loading && !error && React.createElement("p", {
+    className: "hint"
+  }, "Calculando…"), !loading && !error && React.createElement(React.Fragment, null, React.createElement("div", {
+    className: "total-box"
+  }, React.createElement("div", {
+    className: "total-label"
+  }, "Total vendido"), React.createElement("div", {
+    className: "mono total-amount"
+  }, formatMXN(total)), React.createElement("div", {
+    className: "total-sub"
+  }, ventas.length, " ", ventas.length === 1 ? "venta" : "ventas", " · ", pieces, " ", pieces === 1 ? "pieza" : "piezas")), React.createElement("div", {
+    className: "pay-cards"
+  }, methods.map(k => React.createElement("div", {
+    className: "pay-card",
+    key: k
+  }, React.createElement("div", {
+    className: "pay-name"
+  }, PAY_LABEL[k]), React.createElement("div", {
+    className: "mono pay-amount"
+  }, formatMXN(by[k].amount)), React.createElement("div", {
+    className: "pay-count"
+  }, by[k].count, " ", by[k].count === 1 ? "venta" : "ventas")))), by.sin.count > 0 && React.createElement("div", {
+    className: "note-box"
+  }, "Sin forma de pago (ventas de antes de esta función): ", React.createElement("b", null, formatMXN(by.sin.amount)), " · ", by.sin.count), devs.length > 0 && React.createElement("div", {
+    className: "note-box"
+  }, "↩ Devoluciones del día: ", React.createElement("b", null, devs.length), " (", devPieces, " ", devPieces === 1 ? "pieza" : "piezas", "). No se restan de los totales de arriba."), React.createElement("button", {
+    type: "button",
+    className: "btn btn-outline",
+    style: {
+      margin: "12px 0 14px"
+    },
+    onClick: copy
+  }, "📋 Copiar resumen del corte"), React.createElement("h3", {
+    className: "acth",
+    style: {
+      marginBottom: 10
+    }
+  }, "Ventas del día"), React.createElement("div", {
+    className: "acts"
+  }, ventas.length === 0 && React.createElement("p", {
+    className: "hint"
+  }, "No hay ventas registradas en este día."), ventas.map(v => {
+    const p = products.find(pr => pr.id === v.productId);
+    return React.createElement("div", {
+      className: "act",
+      key: v.id
+    }, React.createElement("span", {
+      className: "act-ic sale"
+    }, "↓"), React.createElement("div", {
+      className: "act-text"
+    }, React.createElement("div", null, p ? p.name : "Producto eliminado", " ", React.createElement("span", {
+      className: "mono"
+    }, "×", v.qty), " · ", React.createElement("span", {
+      className: "mono"
+    }, formatMXN(v.total || 0))), React.createElement("div", {
+      className: "hint small"
+    }, new Date(v.ts).toLocaleTimeString("es-MX", {
+      hour: "2-digit",
+      minute: "2-digit"
+    }), " · ", v.payment ? PAY_LABEL[v.payment] : "Sin forma de pago", v.folio ? " · Folio " + v.folio : "")));
+  }))));
+}
 function MainApp({
   session,
   onLogout
@@ -2361,6 +2880,12 @@ function MainApp({
   const [showTheme, setShowTheme] = useState(false);
   const [lotInfo, setLotInfo] = useState(null);
   const [showExpiry, setShowExpiry] = useState(false);
+  const [settings, setSettings] = useState({
+    email: "",
+    enabled: false
+  });
+  const [showSettings, setShowSettings] = useState(false);
+  const [showFeedback, setShowFeedback] = useState(false);
   const alertedRef = useRef(false);
   const expiring = expiringProducts(products);
   const themeTimer = useRef(null);
@@ -2396,6 +2921,13 @@ function MainApp({
       if (data) {
         businessRef.current = data.business_id;
         setBusinessName(data.businesses && data.businesses.name || "");
+        try {
+          const r = await sb.from("businesses").select("alert_email, alert_enabled").eq("id", data.business_id).maybeSingle();
+          if (r && r.data) setSettings({
+            email: r.data.alert_email || "",
+            enabled: !!r.data.alert_enabled
+          });
+        } catch (e) {}
       }
       await loadAll();
     })();
@@ -2514,14 +3046,25 @@ function MainApp({
       };
     }
   }, []);
-  async function registrarVenta(productId, qty) {
-    const {
-      error
-    } = await sb.rpc("register_movement", {
+  async function registrarVenta(productId, qty, opts) {
+    const o = opts || {};
+    const base = {
       p_product: productId,
       p_type: "venta",
       p_qty: qty
+    };
+    let {
+      error
+    } = await sb.rpc("register_movement", {
+      ...base,
+      p_payment: o.payment || null,
+      p_folio: o.folio || null
     });
+    if (error && /could not find|PGRST202|schema cache/i.test((error.message || "") + (error.code || ""))) {
+      ({
+        error
+      } = await sb.rpc("register_movement", base));
+    }
     if (error) {
       showToast({
         kind: "info",
@@ -2531,7 +3074,7 @@ function MainApp({
     }
     showToast({
       kind: "venta",
-      msg: `Venta registrada · -${qty}`
+      msg: `Venta registrada · -${qty}${o.payment ? " · " + PAY_LABEL[o.payment] : ""}`
     });
     await loadAll();
   }
@@ -2679,6 +3222,56 @@ async function asignarLote() {
     await loadAll();
     return true;
   }
+  async function enviarComentario(kind, message) {
+    const {
+      error
+    } = await sb.from("feedback").insert({
+      kind,
+      message
+    });
+    if (error) return false;
+    showToast({
+      kind: "info",
+      msg: "¡Gracias! Recibí tu comentario"
+    });
+    return true;
+  }
+  async function guardarAjustes(email, enabled) {
+    if (!businessRef.current) return false;
+    const {
+      error
+    } = await sb.from("businesses").update({
+      alert_email: email || null,
+      alert_enabled: !!enabled
+    }).eq("id", businessRef.current);
+    if (error) return false;
+    setSettings({
+      email: email || "",
+      enabled: !!enabled
+    });
+    return true;
+  }
+  async function enviarPrueba(email, enabled) {
+    const ok = await guardarAjustes(email, enabled);
+    if (!ok) return {
+      ok: false,
+      code: "save"
+    };
+    const {
+      error
+    } = await sb.rpc("send_test_email");
+    if (error) {
+      const m = error.message || "";
+      const code = m.includes("missing_key") ? "missing_key" : m.includes("too_soon") ? "too_soon" : m.includes("no_email") ? "no_email" : "other";
+      return {
+        ok: false,
+        code
+      };
+    }
+    return {
+      ok: true
+    };
+  }
   async function eliminarProducto(product) {
     const {
       error
@@ -2799,7 +3392,12 @@ async function asignarLote() {
   title: "Productos por caducar"
 }, "🔔", React.createElement("span", {
   className: "badge"
-}, expiring.length)), /*#__PURE__*/React.createElement("button", {
+}, expiring.length)), React.createElement("button", {
+  className: "pill pill-btn",
+  onClick: () => setShowSettings(true),
+  "aria-label": "Configuración",
+  title: "Configuración"
+}, "⚙️"), /*#__PURE__*/React.createElement("button", {
     className: "pill pill-btn",
     onClick: () => setShowTheme(true),
     "aria-label": "Apariencia",
@@ -2825,10 +3423,16 @@ async function asignarLote() {
     onUploadPhoto: uploadProductPhoto,
     expiring: expiring,
     onShowExpiry: () => setShowExpiry(true),
+    onOpenFeedback: () => setShowFeedback(true),
     showToast: showToast
   }), tab === "devolucion" && /*#__PURE__*/React.createElement(DevolucionView, {
     products: products,
     onDevolucion: registrarDevolucion,
+    showToast: showToast
+  }), tab === "corte" && React.createElement(CorteView, {
+    key: "corte",
+    products: products,
+    businessName: businessName,
     showToast: showToast
   }), showExpiry && React.createElement(ExpiryAlertModal, {
   items: expiring,
@@ -2836,6 +3440,19 @@ async function asignarLote() {
 }), lotInfo && React.createElement(LotModal, {
   info: lotInfo,
   onClose: () => setLotInfo(null)
+}), showFeedback && React.createElement(FeedbackModal, {
+  onSend: enviarComentario,
+  onClose: () => setShowFeedback(false)
+}), showSettings && React.createElement(SettingsModal, {
+  settings: settings,
+  defaultEmail: session.user && session.user.email || "",
+  onSave: guardarAjustes,
+  onTest: enviarPrueba,
+  onOpenFeedback: () => {
+    setShowSettings(false);
+    setShowFeedback(true);
+  },
+  onClose: () => setShowSettings(false)
 }), showTheme && /*#__PURE__*/React.createElement(ThemeModal, {
     theme: theme,
     onChange: changeTheme,
@@ -2859,7 +3476,12 @@ async function asignarLote() {
     onClick: () => setTab("devolucion")
   }, /*#__PURE__*/React.createElement("span", {
     className: "ic"
-  }, "↩"), "Devolución")));
+  }, "↩"), "Devolución"), /*#__PURE__*/React.createElement("button", {
+    className: tab === "corte" ? "active" : "",
+    onClick: () => setTab("corte")
+  }, /*#__PURE__*/React.createElement("span", {
+    className: "ic"
+  }, "📊"), "Corte")));
 }
 function Root() {
   const [session, setSession] = useState(undefined);
